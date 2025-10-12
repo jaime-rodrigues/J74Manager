@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: pgvector_db
+    environment:
+      POSTGRES_DB: colab
+      POSTGRES_USER: colab
+      POSTGRES_PASSWORD: colab
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  api:
+    build: .
+    container_name: image_embedder_api
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+    environment:
+      DATABASE_URL: postgresql://colab:colab@db:5432/colab
+      # Pass credentials for pg_dump/psql
+      PG_HOST: db
+      PG_DATABASE: colab
+      PG_USER: colab
+      PG_PASSWORD: colab
+    volumes:
+      - .:/app
+      - E:\002 - Docker\backups:/app/backups # Mapped volume for backups
+
+volumes:
+  pgdata:
+  backups:
