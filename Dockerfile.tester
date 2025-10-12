@@ -1,0 +1,16 @@
+# Dockerfile.tester
+
+# Usar a mesma base Python da API para consistência
+FROM python:3.10-slim
+
+# Definir o diretório de trabalho dentro do contêiner
+WORKDIR /app
+
+# Instalar as dependências necessárias para a interface
+RUN pip install gradio requests
+
+# Copiar o script do aplicativo de teste para dentro do contêiner
+COPY test_app.py .
+
+# Comando para iniciar o aplicativo Gradio quando o contêiner for executado
+CMD ["python", "test_app.py"]

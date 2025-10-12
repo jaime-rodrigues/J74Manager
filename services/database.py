@@ -11,7 +11,6 @@ class DatabaseManager:
         self.pool = None
 
     async def _ensure_vector_extension_exists(self):
-        """Uses a single, temporary connection to ensure the vector extension is created."""
         conn = None
         try:
             conn = await asyncpg.connect(dsn=settings.DATABASE_URL)
@@ -23,12 +22,9 @@ class DatabaseManager:
                 await conn.close()
 
     async def connect_pool(self):
-        """Creates the connection pool after ensuring the vector extension exists."""
         if self.pool:
             return
-
         await self._ensure_vector_extension_exists()
-
         print("Creating database connection pool...")
         self.pool = await asyncpg.create_pool(
             dsn=settings.DATABASE_URL,
@@ -39,7 +35,6 @@ class DatabaseManager:
         print("Database connection pool created successfully.")
 
     async def close_pool(self):
-        """Closes the connection pool. To be called on application shutdown."""
         if self.pool:
             print("Closing database connection pool...")
             await self.pool.close()
@@ -47,8 +42,8 @@ class DatabaseManager:
             print("Database connection pool closed.")
 
     async def create_table(self):
-        """Creates the main table with a Cosine-based HNSW index."""
-        print("Ensuring table 'image_embeddings' and indexes exist...")
+        """ # 3. Otimizar a Tabela: Manter apenas o índice HNSW para cosseno."""
+        print("Ensuring table 'image_embeddings' and HNSW index exist...")
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 await conn.execute(f"""
@@ -59,14 +54,16 @@ class DatabaseManager:
                         embedding vector({settings.EMBEDDING_DIM}) NOT NULL
                     );
                 """)
-                # Drop the old L2 index if it exists
+                # Remover índices antigos/concorrentes para focar no HNSW com cosseno
                 await conn.execute("DROP INDEX IF EXISTS embedding_hnsw_idx;")
-                # Create an index optimized for Cosine Similarity
+                await conn.execute("DROP INDEX IF EXISTS idx_ivfflat_cosine;")
+                # Criar o índice HNSW otimizado para Similaridade de Cosseno
                 await conn.execute("""
                     CREATE INDEX IF NOT EXISTS embedding_cosine_idx
-                    ON image_embeddings USING hnsw (embedding vector_cosine_ops);
+                    ON image_embeddings USING hnsw (embedding vector_cosine_ops)
+                    WITH (m = 32, ef_construction = 150);
                 """)
-        print("Table and Cosine index are ready.")
+        print("Table and HNSW Cosine index are ready.")
 
     async def insert_embeddings_batch(self, records: List[Tuple[str, str, np.ndarray]]):
         if not records:
@@ -77,23 +74,21 @@ class DatabaseManager:
                 VALUES ($1, $2, $3)
                 ON CONFLICT (filepath) DO NOTHING;
             """
-            processed_records = [(r[0], r[1], r[2]) for r in records]
-            await conn.executemany(query, processed_records)
+            await conn.executemany(query, records)
 
     async def search_similar(self, embedding: np.ndarray, top_k: int = 5) -> List[Dict]:
-        """Asynchronously searches for similar images using Cosine Similarity."""
+        """# 1. Simplificar a Query: Usar a busca HNSW direta e eficiente."""
+        query = """
+            SELECT id, filename, filepath, 1 - (embedding <=> $1) as similarity
+            FROM image_embeddings
+            ORDER BY embedding <=> $1
+            LIMIT $2;
+        """
         async with self.pool.acquire() as conn:
-            # Use the <=> operator for Cosine Distance
-            # The result is Cosine Distance (0=identical, 1=orthogonal, 2=opposite)
-            # We calculate `1 - distance` to get Cosine Similarity (-1 to 1)
-            query = """
-                SELECT id, filename, filepath, 1 - (embedding <=> $1) as similarity
-                FROM image_embeddings
-                ORDER BY embedding <=> $1
-                LIMIT $2;
-            """
+            # 2. Ajustar a Precisão: Definir o parâmetro de busca para HNSW.
+            # Valores maiores = mais preciso, mais lento. Valores menores = mais rápido, menos preciso.
+            await conn.execute("SET LOCAL hnsw.ef_search = 100;")
             rows = await conn.fetch(query, embedding, top_k)
-            # Convert asyncpg.Record to dict for Pydantic compatibility
             return [dict(row) for row in rows]
 
     async def list_records(self, limit: int = 100, offset: int = 0) -> List[Dict]:

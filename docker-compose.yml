@@ -22,14 +22,23 @@ services:
       - db
     environment:
       DATABASE_URL: postgresql://colab:colab@db:5432/colab
-      # Pass credentials for pg_dump/psql
-      PG_HOST: db
-      PG_DATABASE: colab
-      PG_USER: colab
-      PG_PASSWORD: colab
     volumes:
       - .:/app
-      - E:\002 - Docker\backups:/app/backups # Mapped volume for backups
+      - backups:/app/backups
+
+  tester_ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.tester
+    container_name: gradio_tester_ui
+    ports:
+      - "7860:7860"
+    volumes:
+      - .:/app
+    depends_on:
+      - api
+    environment:
+      API_BASE_URL: http://api:8000
 
 volumes:
   pgdata:
