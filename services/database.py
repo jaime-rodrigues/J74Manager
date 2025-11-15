@@ -36,63 +36,89 @@ class DatabaseManager:
 
     async def close_pool(self):
         if self.pool:
-            print("Closing database connection pool...")
             await self.pool.close()
             self.pool = None
             print("Database connection pool closed.")
 
     async def create_table(self):
-        """ # 3. Otimizar a Tabela: Manter apenas o índice HNSW para cosseno."""
-        print("Ensuring table 'image_embeddings' and HNSW index exist...")
+        """Creates the table with embedding_type column and necessary indexes."""
+        print("Ensuring table 'image_embeddings' and indexes exist...")
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 await conn.execute(f"""
                     CREATE TABLE IF NOT EXISTS image_embeddings (
                         id SERIAL PRIMARY KEY,
                         filename VARCHAR(255) NOT NULL,
-                        filepath VARCHAR(4096) NOT NULL UNIQUE,
-                        embedding vector({settings.EMBEDDING_DIM}) NOT NULL
+                        filepath VARCHAR(4096) NOT NULL,
+                        embedding vector({settings.EMBEDDING_DIM}) NOT NULL,
+                        embedding_type VARCHAR(20) NOT NULL,
+                        UNIQUE (filepath, embedding) -- Evita duplicatas exatas
                     );
                 """)
-                # Remover índices antigos/concorrentes para focar no HNSW com cosseno
-                await conn.execute("DROP INDEX IF EXISTS embedding_hnsw_idx;")
-                await conn.execute("DROP INDEX IF EXISTS idx_ivfflat_cosine;")
-                # Criar o índice HNSW otimizado para Similaridade de Cosseno
+                await conn.execute("DROP INDEX IF EXISTS embedding_cosine_idx;")
                 await conn.execute("""
                     CREATE INDEX IF NOT EXISTS embedding_cosine_idx
-                    ON image_embeddings USING hnsw (embedding vector_cosine_ops)
-                    WITH (m = 32, ef_construction = 150);
+                    ON image_embeddings USING hnsw (embedding vector_cosine_ops);
                 """)
-        print("Table and HNSW Cosine index are ready.")
+                # Adicionar um índice na nova coluna para buscas mais rápidas
+                await conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_embedding_type
+                    ON image_embeddings(embedding_type);
+                """)
+        print("Table with embedding_type and indexes are ready.")
 
-    async def insert_embeddings_batch(self, records: List[Tuple[str, str, np.ndarray]]):
+    async def insert_embeddings_batch(self, records: List[Tuple[str, str, np.ndarray, str]]):
+        """Asynchronously inserts a batch of embeddings with their type."""
         if not records:
             return
         async with self.pool.acquire() as conn:
             query = """
-                INSERT INTO image_embeddings (filename, filepath, embedding)
-                VALUES ($1, $2, $3)
-                ON CONFLICT (filepath) DO NOTHING;
+                INSERT INTO image_embeddings (filename, filepath, embedding, embedding_type)
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT (filepath, embedding) DO NOTHING;
             """
             await conn.executemany(query, records)
 
-    async def search_similar(self, embedding: np.ndarray, top_k: int = 5) -> List[Dict]:
-        """# 1. Simplificar a Query: Usar a busca HNSW direta e eficiente."""
-        query = """
+    async def search_similar(self, embedding: np.ndarray, top_k: int = 5, scope: str = 'original_only') -> List[Dict]:
+        """
+        Asynchronously searches for similar images with a configurable scope.
+        
+        Args:
+            scope (str): 'original_only' to search against original images, 
+                         'all' to search against originals and augmentations.
+        """
+        base_query = """
             SELECT id, filename, filepath, 1 - (embedding <=> $1) as similarity
             FROM image_embeddings
+        """
+        
+        # Adicionar a cláusula WHERE dinamicamente com base no escopo
+        if scope == 'original_only':
+            where_clause = "WHERE embedding_type = 'original'"
+        else: # 'all'
+            where_clause = ""
+
+        full_query = f"""
+            {base_query}
+            {where_clause}
             ORDER BY embedding <=> $1
             LIMIT $2;
         """
+        
         async with self.pool.acquire() as conn:
-            # 2. Ajustar a Precisão: Definir o parâmetro de busca para HNSW.
-            # Valores maiores = mais preciso, mais lento. Valores menores = mais rápido, menos preciso.
             await conn.execute("SET LOCAL hnsw.ef_search = 100;")
-            rows = await conn.fetch(query, embedding, top_k)
+            rows = await conn.fetch(full_query, embedding, top_k)
             return [dict(row) for row in rows]
+
+    async def get_embedding_by_filepath(self, filepath: str) -> np.ndarray | None:
+        """Retrieves the 'original' embedding vector for a specific image filepath."""
+        query = "SELECT embedding FROM image_embeddings WHERE filepath = $1 AND embedding_type = 'original' LIMIT 1;"
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(query, filepath)
+            return row['embedding'] if row else None
 
     async def list_records(self, limit: int = 100, offset: int = 0) -> List[Dict]:
         async with self.pool.acquire() as conn:
-            query = "SELECT id, filename, filepath FROM image_embeddings ORDER BY id LIMIT $1 OFFSET $2;"
+            query = "SELECT id, filename, filepath, embedding_type FROM image_embeddings ORDER BY id LIMIT $1 OFFSET $2;"
             rows = await conn.fetch(query, limit, offset)
             return [dict(row) for row in rows]

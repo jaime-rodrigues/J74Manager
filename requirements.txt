@@ -1,6 +1,5 @@
 fastapi
 uvicorn[standard]
-# psycopg2-binary is replaced by asyncpg
 asyncpg
 pgvector
 torch
@@ -10,3 +9,8 @@ numpy
 retry
 python-multipart
 torchvision
+scipy
+
+# Dependências para a fila de tarefas profissional
+celery
+redis

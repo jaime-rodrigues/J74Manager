@@ -1,44 +1,46 @@
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Any
 
-# --- Request Schemas ---
+# --- Task Schemas ---
+
+class Task(BaseModel):
+    """Schema for representing the status of a background task."""
+    id: str
+    status: str
+    progress: str | None = None
+    result: Any | None = None
+    error: str | None = None
+
+class TaskCreationResponse(BaseModel):
+    """Schema for the response when a new task is created."""
+    task_id: str
+    status_endpoint: str
+
+# --- Image Schemas (existentes) ---
 
 class EmbeddingRequest(BaseModel):
-    """Schema for a search request using a pre-computed embedding."""
     embedding: List[float]
-    top_k: int = Field(5, gt=0, le=100, description="Number of similar images to return.")
-
-class ImageSearchRequest(BaseModel):
-    """Schema for a search request using an image file (will be deprecated)."""
     top_k: int = Field(5, gt=0, le=100)
 
-
-# --- Response Schemas ---
-
 class ImageResult(BaseModel):
-    """Schema for a single image result in a similarity search."""
     id: int
     filename: str
     filepath: str
     similarity: float
-
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 class ImageRecord(BaseModel):
-    """Schema for a single image record from the database listing."""
     id: int
     filename: str
     filepath: str
-
     class Config:
-        orm_mode = True
+        from_attributes = True
 
 class SearchResponse(BaseModel):
-    """Schema for the response of a similarity search."""
     query_filename: str | None = None
     similar_images: List[ImageResult]
+    query_embedding: List[float] | None = None
 
 class ListImagesResponse(BaseModel):
-    """Schema for the response of listing images."""
     images: List[ImageRecord]

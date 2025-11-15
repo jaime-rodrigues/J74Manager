@@ -6,8 +6,8 @@ FROM python:3.10-slim
 # Definir o diretório de trabalho dentro do contêiner
 WORKDIR /app
 
-# Instalar as dependências necessárias para a interface
-RUN pip install gradio requests
+# Instalar as dependências necessárias para a interface e a visualização
+RUN pip install gradio requests umap-learn matplotlib seaborn
 
 # Copiar o script do aplicativo de teste para dentro do contêiner
 COPY test_app.py .
