@@ -1,4 +1,5 @@
 import os
+import asyncio
 from celery import Celery
 from celery.result import AsyncResult
 
@@ -9,7 +10,6 @@ from services.image_processor import ImageProcessor
 from core.config import settings
 
 # --- Configuração do Celery ---
-# O Celery usará as variáveis de ambiente que definimos no docker-compose.yml
 celery_app = Celery(
     "tasks",
     broker=os.environ.get("CELERY_BROKER_URL", "redis://localhost:6379/0"),
@@ -17,56 +17,57 @@ celery_app = Celery(
 )
 
 # --- Instâncias de Serviço para o Worker ---
-# O worker precisa de suas próprias instâncias dos serviços para se conectar ao DB e carregar o modelo.
-# Como o worker é um processo separado, ele não compartilha memória com a API.
-db_manager = DatabaseManager()
+# O embedder pode ser global, pois é carregado uma vez e depois é somente leitura.
+# Isso economiza memória e tempo de carregamento em cada tarefa.
 embedder = CLIPEmbedder()
-image_processor = ImageProcessor(db_manager, embedder)
 
-@celery_app.on_after_configure.connect
-def setup_future_tasks(sender, **kwargs):
-    """Garante que o worker possa se conectar ao banco de dados."""
-    # O loop de eventos do Celery é diferente, então precisamos de uma maneira
-    # de executar a corrotina de conexão do asyncpg.
-    import asyncio
-    asyncio.run(db_manager.connect_pool())
+# O DatabaseManager e o ImageProcessor serão instanciados DENTRO da tarefa
+# para garantir que cada tarefa tenha seu próprio pool de conexões de banco de dados.
 
 # --- Definição da Tarefa ---
 @celery_app.task(bind=True)
 def process_folder_task(self, folder_path: str, use_augmentation: bool):
     """
-    A tarefa Celery que executa o processamento de imagens de forma assíncrona.
-    O 'self' (bind=True) nos dá acesso ao objeto da tarefa para atualizar o estado.
+    Tarefa Celery que processa imagens. Cada execução desta tarefa gerencia
+    seu próprio ciclo de vida de conexão com o banco de dados para evitar conflitos de concorrência.
     """
+    # 1. Instanciar serviços por tarefa para garantir isolamento.
+    db_manager = DatabaseManager()
+    image_processor = ImageProcessor(db_manager, embedder)
+
+    async def _process():
+        # 2. Conectar ao banco de dados no início da execução da tarefa.
+        await db_manager.connect_pool()
+        try:
+            from pathlib import Path
+            folder = Path(folder_path)
+            all_image_files = [p for p in folder.rglob('*') if p.suffix.lower() in settings.IMAGE_EXTS]
+            total_images = len(all_image_files)
+
+            if total_images == 0:
+                raise ValueError("No images found in the specified folder.")
+
+            print(f"Task {self.request.id}: Found {total_images} images.")
+            self.update_state(state='PROGRESS', meta={'progress': f"0/{total_images}"})
+
+            # A lógica de processamento principal
+            await image_processor.process_images_in_folder_celery(
+                self, total_images, all_image_files, use_augmentation
+            )
+
+            return {'progress': f"{total_images}/{total_images}", 'result': f"Successfully processed {total_images} images."}
+        finally:
+            # 3. Garantir que a conexão seja fechada, mesmo se ocorrer um erro.
+            print(f"Task {self.request.id}: Closing database connections.")
+            await db_manager.disconnect_pool()
+
     try:
-        # Usar a lógica que já tínhamos no ImageProcessor, mas adaptada para Celery
-        from pathlib import Path
-        import time
-
-        folder = Path(folder_path)
-        all_image_files = [p for p in folder.rglob('*') if p.suffix.lower() in settings.IMAGE_EXTS]
-        total_images = len(all_image_files)
-
-        if total_images == 0:
-            raise ValueError("No images found in the specified folder.")
-
-        print(f"Task {self.request.id}: Found {total_images} images.")
-        self.update_state(state='PROGRESS', meta={'progress': f"0/{total_images}"})
-
-        # O worker precisa de seu próprio loop de eventos para executar as corrotinas
-        loop = asyncio.get_event_loop()
-        
-        # A lógica de processamento de imagem agora é chamada aqui
-        loop.run_until_complete(
-            image_processor.process_images_in_folder_celery(self, total_images, all_image_files, use_augmentation)
-        )
-
-        return {'progress': f"{total_images}/{total_images}", 'result': f"Successfully processed {total_images} images."}
-
+        # 4. Executar a lógica assíncrona principal.
+        result = asyncio.run(_process())
+        return result
     except Exception as e:
         self.update_state(state='FAILURE', meta={'error': str(e)})
         print(f"Task {self.request.id}: Failed. Reason: {str(e)}")
-        # Re-raise a exceção para que o Celery a capture como uma falha
         raise
 
 def get_task_info(task_id: str) -> dict:
@@ -88,6 +89,6 @@ def get_task_info(task_id: str) -> dict:
     elif task_result.state == 'SUCCESS':
         info.update(task_result.result)
     elif task_result.state == 'FAILURE':
-        info['error'] = str(task_result.info) # A exceção é armazenada em info
+        info['error'] = str(task_result.info)
     
     return info

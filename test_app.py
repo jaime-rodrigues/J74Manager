@@ -36,7 +36,7 @@ def start_processing(folder_name, use_augmentation):
         response = requests.post(API_PROCESS_URL, data=data)
         response.raise_for_status()
         task_info = response.json()
-        # Inicia o loop de atualização de status
+        # Retorna o ID da tarefa, uma mensagem de status inicial e torna a linha de status visível
         return task_info['task_id'], f"Tarefa enviada para a fila. ID: {task_info['task_id']}", gr.update(visible=True)
     except requests.exceptions.RequestException as e:
         raise gr.Error(f"Falha ao iniciar a tarefa: {e}")
@@ -61,29 +61,48 @@ def get_task_status(task_id):
             status_report += f" | Erro: {task['error']}"
             
         is_done = task['status'] in ['SUCCESS', 'FAILURE']
+        # Retorna o status e controla a visibilidade do botão de atualização
         return status_report, gr.update(visible=not is_done)
         
     except requests.exceptions.RequestException as e:
         return f"Erro ao consultar status: {e}", gr.update(visible=True)
 
-# ... (outras funções de lógica permanecem as mesmas) ...
-def search_images(query_image, search_scope):
-    if query_image is None: return [], None, None, None, gr.update(visible=False)
-    img_byte_arr = io.BytesIO(); query_image.save(img_byte_arr, format='JPEG'); img_byte_arr = img_byte_arr.getvalue()
+def search_images(query_image, search_scope, top_k):
+    """Busca por imagens similares usando a API."""
+    if query_image is None: 
+        return [], None, None, None, gr.update(visible=False), gr.update(choices=[], value=None)
+    
+    img_byte_arr = io.BytesIO()
+    query_image.save(img_byte_arr, format='JPEG')
+    img_byte_arr = img_byte_arr.getvalue()
+    
     files = {'file': ('query.jpg', img_byte_arr, 'image/jpeg')}
     scope_value = 'all' if search_scope == "Tudo (Originais + Variações)" else 'original_only'
-    data = {'scope': scope_value}
+    data = {'scope': scope_value, 'top_k': int(top_k)}
+    
     try:
-        response = requests.post(API_SEARCH_URL, files=files, data=data, params={'top_k': 5}); response.raise_for_status()
-        results = response.json(); similar_images = results.get("similar_images", [])
-        if not similar_images: return [], query_image, results, None, gr.update(visible=False)
-        gallery_data = []; filepath_choices = []
+        response = requests.post(API_SEARCH_URL, files=files, data=data)
+        response.raise_for_status()
+        
+        results = response.json()
+        similar_images = results.get("similar_images", [])
+        
+        if not similar_images:
+            return [], query_image, results, None, gr.update(visible=False), gr.update(choices=[], value=None)
+            
+        gallery_data = []
+        filepath_choices = []
         for img in similar_images:
-            full_path = os.path.join(UPLOADS_DIR, img["filepath"]); similarity_score = img['similarity'] * 100
+            full_path = os.path.join(UPLOADS_DIR, img["filepath"])
+            similarity_score = img['similarity'] * 100
             caption = f"Similaridade: {similarity_score:.1f}%\nArquivo: {img['filename']}"
-            gallery_data.append((full_path, caption)); filepath_choices.append(img["filepath"])
+            gallery_data.append((full_path, caption))
+            filepath_choices.append(img["filepath"])
+            
         return gallery_data, query_image, results, None, gr.update(visible=True), gr.update(choices=filepath_choices, value=filepath_choices[0])
-    except requests.exceptions.RequestException as e: raise gr.Error(f"Falha ao conectar com a API de busca. Detalhes: {e}")
+        
+    except requests.exceptions.RequestException as e:
+        raise gr.Error(f"Falha ao conectar com a API de busca. Detalhes: {e}")
 
 def get_metrics(original_image_state, search_results_state, evt: gr.SelectData):
     if original_image_state is None or search_results_state is None: raise gr.Error("Faça uma busca primeiro.")
@@ -133,24 +152,24 @@ with gr.Blocks() as demo:
 
     with gr.Tabs():
         with gr.TabItem("Indexação de Imagens"):
-            gr.Markdown("Use esta aba para iniciar o processo de indexação de imagens no banco de dados. O status da tarefa será atualizado automaticamente.")
+            gr.Markdown("Use esta aba para iniciar o processo de indexação de imagens no banco de dados. O status da tarefa será atualizado manualmente.")
             with gr.Row():
                 folder_name_input = gr.Textbox(label="Nome da Pasta em 'uploads/'", placeholder="ex: imagens/produtos")
                 use_augmentation_checkbox = gr.Checkbox(label="Usar Data Augmentation", value=False)
             start_button = gr.Button("Iniciar Indexação")
             
-            with gr.Row():
+            with gr.Row(visible=False) as status_row:
                 task_status_output = gr.Textbox(label="Status da Tarefa", interactive=False)
-            
-            # O loop de atualização agora é gerenciado pelo Gradio
-            demo.load(get_task_status, inputs=task_id_state, outputs=[task_status_output], every=3)
+                refresh_button = gr.Button("Atualizar Status")
+
+            demo.load(get_task_status, inputs=task_id_state, outputs=[task_status_output, refresh_button])
 
         with gr.TabItem("Busca e Métricas"):
-            # ... (código da aba de busca) ...
-            gr.Markdown("**Passo 1:** Escolha o escopo da busca. **Passo 2:** Faça o upload de uma imagem e clique em 'Buscar'.")
+            gr.Markdown("**Passo 1:** Configure a busca. **Passo 2:** Faça o upload de uma imagem e clique em 'Buscar'.")
             with gr.Row():
                 with gr.Column(scale=1):
                     search_scope_radio = gr.Radio(["Apenas Originais", "Tudo (Originais + Variações)"], label="Escopo da Busca", value="Apenas Originais")
+                    top_k_slider = gr.Slider(minimum=1, maximum=20, value=5, step=1, label="Número de Resultados")
                     input_image = gr.Image(type="pil", label="Imagem de Busca")
                     submit_button = gr.Button("Buscar Imagens Similares")
                 with gr.Column(scale=2):
@@ -159,13 +178,11 @@ with gr.Blocks() as demo:
                 metrics_output = gr.JSON(label="Relatório de Métricas Semânticas")
 
         with gr.TabItem("Análise Visual de Embeddings (UMAP)"):
-            # ... (código da aba de visualização) ...
             gr.Markdown("Clique no botão para gerar um gráfico UMAP dos embeddings da última busca.")
             visualize_button = gr.Button("Visualizar Embeddings da Última Busca", visible=False)
             umap_plot = gr.Plot(label="Gráfico UMAP")
 
         with gr.TabItem("Diagnóstico de Embedding"):
-            # ... (código da aba de diagnóstico) ...
             gr.Markdown("Compare o embedding de uma imagem de upload com um embedding armazenado no DB.")
             with gr.Row():
                 diagnostic_image_input = gr.Image(type="pil", label="Imagem para Upload")
@@ -174,8 +191,14 @@ with gr.Blocks() as demo:
             diagnostic_output = gr.JSON(label="Relatório de Diagnóstico")
 
     # Ações dos botões
-    start_button.click(fn=start_processing, inputs=[folder_name_input, use_augmentation_checkbox], outputs=[task_id_state, task_status_output])
-    submit_button.click(fn=search_images, inputs=[input_image, search_scope_radio], outputs=[output_gallery, original_image_state, search_results_state, metrics_output, visualize_button, db_filepath_dropdown])
+    start_button.click(fn=start_processing, inputs=[folder_name_input, use_augmentation_checkbox], outputs=[task_id_state, task_status_output, status_row])
+    refresh_button.click(get_task_status, inputs=task_id_state, outputs=[task_status_output, refresh_button])
+
+    submit_button.click(
+        fn=search_images, 
+        inputs=[input_image, search_scope_radio, top_k_slider], 
+        outputs=[output_gallery, original_image_state, search_results_state, metrics_output, visualize_button, db_filepath_dropdown]
+    )
     output_gallery.select(fn=get_metrics, inputs=[original_image_state, search_results_state], outputs=metrics_output)
     visualize_button.click(fn=visualize_results, inputs=[search_results_state], outputs=[umap_plot])
     diagnostic_button.click(fn=run_diagnostics, inputs=[diagnostic_image_input, db_filepath_dropdown], outputs=[diagnostic_output])

@@ -14,12 +14,7 @@ router = APIRouter(
     tags=["Metrics"]
 )
 
-# Dependency placeholder to get service instances from main.py
-def get_services():
-    from main import db_manager, embedder
-    return db_manager, embedder
-
-# Instantiate the calculator
+# Instantiate the calculator (it's stateless, so it can be global)
 metric_calculator = MetricCalculator()
 
 @router.post("/compare-embeddings")
@@ -29,11 +24,16 @@ async def compare_embeddings_endpoint(
 ):
     """
     Calculates semantic similarity metrics between two images by comparing their embeddings.
-    - Generates embedding for the uploaded query image.
-    - Fetches the pre-calculated embedding for the selected image from the database.
+    This endpoint is self-contained and manages its own service instances.
     """
-    db_manager, embedder = get_services()
+    # Instantiate services per request to ensure isolation
+    db_manager = DatabaseManager()
+    embedder = CLIPEmbedder()
+    
     try:
+        # Connect to the database
+        await db_manager.connect_pool()
+
         # 1. Generate embedding for the uploaded query image
         query_contents = await query_image.read()
         pil_query_image = Image.open(io.BytesIO(query_contents))
@@ -55,3 +55,7 @@ async def compare_embeddings_endpoint(
 
     except Exception as e:
         return JSONResponse(status_code=500, content={"message": f"An error occurred during metric calculation: {str(e)}"})
+    finally:
+        # Ensure the database connection is always closed
+        if db_manager:
+            await db_manager.close_pool()

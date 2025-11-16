@@ -1,9 +1,11 @@
 import os
+import asyncio
 from fastapi import FastAPI
 from pathlib import Path
 
 # Import configurations and routers
 from core.config import settings
+from services.database import DatabaseManager
 from api import database as db_router
 from api import images as img_router
 from api import metrics as metrics_router
@@ -12,17 +14,25 @@ from api import diagnostics as diagnostics_router
 from api import tasks as tasks_router
 
 # --- FastAPI Application Setup ---
-# Não precisamos mais instanciar os serviços aqui, pois a API e o Worker
-# criarão suas próprias instâncias conforme necessário.
 app = FastAPI(
     title="Image Embedding and Search API (Professional)",
     description="A professional API using Celery and Redis for persistent, trackable background tasks.",
     version="3.0.0"
 )
 
-# Os eventos de startup/shutdown da API não precisam mais gerenciar o DB pool,
-# pois cada requisição (ou o worker) gerenciará seu próprio ciclo de vida de conexão.
-# Isso torna a API mais stateless e robusta.
+@app.on_event("startup")
+async def startup_event():
+    """
+    On startup, connect to the database and create the necessary tables.
+    This ensures the 'image_embeddings' table exists before any operations are performed.
+    """
+    print("API is starting up...")
+    db_manager = DatabaseManager()
+    await db_manager.connect_pool()
+    await db_manager.create_table()
+    # We don't close the pool here, as it might be used by other parts of the app
+    # during its lifecycle. FastAPI will handle the shutdown.
+    print("API startup complete. Database table is ready.")
 
 # --- API Routers ---
 app.include_router(db_router.router)

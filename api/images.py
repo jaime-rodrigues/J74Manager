@@ -35,7 +35,8 @@ async def process_folder_endpoint(
     task = process_folder_task.delay(target_folder, use_augmentation)
     
     status_endpoint = request.url_for('get_task_status', task_id=task.id)
-    return TaskCreationResponse(task_id=task.id, status_endpoint=status_endpoint)
+    # Converte o objeto URL para string para compatibilidade com Pydantic V2
+    return TaskCreationResponse(task_id=task.id, status_endpoint=str(status_endpoint))
 
 # ... (os outros endpoints de busca e listagem não precisam de grandes mudanças) ...
 @router.post("/search-by-embedding", response_model=SearchResponse)

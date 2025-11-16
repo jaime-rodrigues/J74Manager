@@ -41,10 +41,11 @@ class DatabaseManager:
             print("Database connection pool closed.")
 
     async def create_table(self):
-        """Creates the table with embedding_type column and necessary indexes."""
+        """Creates or updates the table to the latest schema."""
         print("Ensuring table 'image_embeddings' and indexes exist...")
         async with self.pool.acquire() as conn:
             async with conn.transaction():
+                # 1. Create the table if it doesn't exist (for the first run)
                 await conn.execute(f"""
                     CREATE TABLE IF NOT EXISTS image_embeddings (
                         id SERIAL PRIMARY KEY,
@@ -52,58 +53,44 @@ class DatabaseManager:
                         filepath VARCHAR(4096) NOT NULL,
                         embedding vector({settings.EMBEDDING_DIM}) NOT NULL,
                         embedding_type VARCHAR(20) NOT NULL,
-                        UNIQUE (filepath, embedding) -- Evita duplicatas exatas
+                        embedding_hash VARCHAR(64) NOT NULL
                     );
                 """)
-                await conn.execute("DROP INDEX IF EXISTS embedding_cosine_idx;")
-                await conn.execute("""
-                    CREATE INDEX IF NOT EXISTS embedding_cosine_idx
-                    ON image_embeddings USING hnsw (embedding vector_cosine_ops);
-                """)
-                # Adicionar um índice na nova coluna para buscas mais rápidas
-                await conn.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_embedding_type
-                    ON image_embeddings(embedding_type);
-                """)
-        print("Table with embedding_type and indexes are ready.")
 
-    async def insert_embeddings_batch(self, records: List[Tuple[str, str, np.ndarray, str]]):
-        """Asynchronously inserts a batch of embeddings with their type."""
+                # 3. Remove the old, problematic unique constraint if it exists
+                #await conn.execute("ALTER TABLE image_embeddings DROP CONSTRAINT IF EXISTS image_embeddings_filepath_embedding_key;")
+
+                # 4. Add the new, robust unique constraint using the hash
+                # We also drop it first to make this operation idempotent
+                #await conn.execute("ALTER TABLE image_embeddings DROP CONSTRAINT IF EXISTS image_embeddings_filepath_hash_key;")
+                #await conn.execute("ALTER TABLE image_embeddings ADD CONSTRAINT image_embeddings_filepath_hash_key UNIQUE (filepath, embedding_hash);")
+                
+                # 5. Create other necessary indexes
+                await conn.execute("CREATE INDEX IF NOT EXISTS embedding_cosine_idx ON image_embeddings USING hnsw (embedding vector_cosine_ops);")
+                await conn.execute("CREATE INDEX IF NOT EXISTS idx_embedding_type ON image_embeddings(embedding_type);")
+
+        print("Table schema is up to date.")
+
+    async def insert_embeddings_batch(self, records: List[Tuple[str, str, np.ndarray, str, str]]):
+        """Asynchronously inserts a batch of embeddings with their hash and type."""
         if not records:
             return
         async with self.pool.acquire() as conn:
             query = """
-                INSERT INTO image_embeddings (filename, filepath, embedding, embedding_type)
-                VALUES ($1, $2, $3, $4)
-                ON CONFLICT (filepath, embedding) DO NOTHING;
+                INSERT INTO image_embeddings (filename, filepath, embedding, embedding_type, embedding_hash)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (filepath, embedding_hash) DO NOTHING;
             """
             await conn.executemany(query, records)
 
     async def search_similar(self, embedding: np.ndarray, top_k: int = 5, scope: str = 'original_only') -> List[Dict]:
         """
         Asynchronously searches for similar images with a configurable scope.
+        """
+        base_query = "SELECT id, filename, filepath, 1 - (embedding <=> $1) as similarity FROM image_embeddings"
         
-        Args:
-            scope (str): 'original_only' to search against original images, 
-                         'all' to search against originals and augmentations.
-        """
-        base_query = """
-            SELECT id, filename, filepath, 1 - (embedding <=> $1) as similarity
-            FROM image_embeddings
-        """
-        
-        # Adicionar a cláusula WHERE dinamicamente com base no escopo
-        if scope == 'original_only':
-            where_clause = "WHERE embedding_type = 'original'"
-        else: # 'all'
-            where_clause = ""
-
-        full_query = f"""
-            {base_query}
-            {where_clause}
-            ORDER BY embedding <=> $1
-            LIMIT $2;
-        """
+        where_clause = "WHERE embedding_type = 'original'" if scope == 'original_only' else ""
+        full_query = f"{base_query} {where_clause} ORDER BY embedding <=> $1 LIMIT $2;"
         
         async with self.pool.acquire() as conn:
             await conn.execute("SET LOCAL hnsw.ef_search = 100;")

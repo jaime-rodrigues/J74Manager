@@ -1,4 +1,5 @@
 import os
+import hashlib
 from pathlib import Path
 from typing import List
 from PIL import Image
@@ -25,6 +26,10 @@ class ImageProcessor:
         """Applies a series of augmentations to an image."""
         return [transform(image) for transform in self.transformations]
 
+    def _get_embedding_hash(self, embedding) -> str:
+        """Calculates a SHA-256 hash for a given embedding vector."""
+        return hashlib.sha256(embedding.tobytes()).hexdigest()
+
     async def process_images_in_folder_celery(
         self, 
         task, # O objeto da tarefa Celery para atualizar o estado
@@ -33,7 +38,7 @@ class ImageProcessor:
         use_augmentation: bool = False
     ):
         """
-        The core logic for processing images, now designed to be called by a Celery worker.
+        The core logic for processing images, now including hash calculation for unique constraints.
         """
         records = []
         for i, image_file in enumerate(all_image_files):
@@ -42,13 +47,15 @@ class ImageProcessor:
                 relative_path = os.path.relpath(image_file, settings.UPLOAD_DIR)
                 
                 original_embedding = self.embedder.generate_embedding(image)
-                records.append((os.path.basename(image_file), relative_path, original_embedding, 'original'))
+                original_hash = self._get_embedding_hash(original_embedding)
+                records.append((os.path.basename(image_file), relative_path, original_embedding, 'original', original_hash))
 
                 if use_augmentation:
                     augmented_images = self._apply_transformations(image)
                     for aug_image in augmented_images:
                         aug_embedding = self.embedder.generate_embedding(aug_image)
-                        records.append((os.path.basename(image_file), relative_path, aug_embedding, 'augmented'))
+                        aug_hash = self._get_embedding_hash(aug_embedding)
+                        records.append((os.path.basename(image_file), relative_path, aug_embedding, 'augmented', aug_hash))
 
                 if len(records) >= settings.BATCH_SIZE:
                     await self.db_manager.insert_embeddings_batch(records)
